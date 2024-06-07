@@ -30,8 +30,8 @@ decl_module! {
       // takes a name, ticker, total supply for the token
       // makes the initiating account the owner of the token
       // the balance of the owner is set to total supply
-      fn init(_origin, name: Vec<u8>, ticker: Vec<u8>, total_supply: T::TokenBalance) -> Result {
-          let sender = ensure_signed(_origin)?;
+      fn init(origin, name: Vec<u8>, ticker: Vec<u8>, total_supply: T::TokenBalance) -> Result {
+          let sender = ensure_signed(origin)?;
 
           // checking max size for name and ticker
           // byte arrays (vecs) with no max size should be avoided
@@ -39,7 +39,8 @@ decl_module! {
           ensure!(ticker.len() <= 32, "token ticker cannot exceed 32 bytes");
 
           let token_id = Self::token_id();
-          <TokenId<T>>::put(token_id + 1);
+          let next_token_id = token_id.checked_add(1).ok_or("overflow in calculating next token id")?;
+          <TokenId<T>>::put(next_token_id);
 
           let token = Erc20Token {
               name,
@@ -134,7 +135,7 @@ impl<T: Trait> Module<T> {
     ) -> Result {
         ensure!(<BalanceOf<T>>::exists((token_id, from.clone())), "Account does not own this token");
         let sender_balance = Self::balance_of((token_id, from.clone()));
-        ensure!(sender_balance > value, "Not enough balance.");
+        ensure!(sender_balance >= value, "Not enough balance.");
 
         let updated_from_balance = sender_balance.checked_sub(&value).ok_or("overflow in calculating balance")?;
         let receiver_balance = Self::balance_of((token_id, to.clone()));
