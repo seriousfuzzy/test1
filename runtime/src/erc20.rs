@@ -1,5 +1,6 @@
 use rstd::prelude::*;
-use srml_support::{dispatch::Result, StorageMap, StorageValue};
+use support::{dispatch::Result, StorageMap, StorageValue, decl_storage, decl_module, decl_event, ensure};
+use runtime_primitives::traits::{CheckedSub, CheckedAdd};
 use {balances, system::ensure_signed};
 
 // the module trait
@@ -30,6 +31,11 @@ decl_module! {
       fn init(_origin, name: Vec<u8>, ticker: Vec<u8>, total_supply: T::Balance) -> Result {
           let sender = ensure_signed(_origin)?;
 
+          // checking max size for name and ticker
+          // byte arrays (vecs) with no max size should be avoided
+          ensure!(name.len() <= 64, "token name cannot exceed 64 bytes");
+          ensure!(ticker.len() <= 32, "token ticker cannot exceed 32 bytes");
+
           let token_id = Self::token_id();
           <TokenId<T>>::put(token_id + 1);
 
@@ -57,13 +63,15 @@ decl_module! {
       fn approve(_origin, token_id: u32, spender: T::AccountId, value: T::Balance) -> Result {
           let sender = ensure_signed(_origin)?;
           ensure!(<BalanceOf<T>>::exists((token_id, sender.clone())), "Account does not own this token");
-          Self::deposit_event(RawEvent::Approval(token_id, sender.clone(), spender.clone(), value));
 
-          if <Allowance<T>>::exists((token_id, sender.clone(), spender.clone())) {
-              <Allowance<T>>::mutate((token_id, sender, spender), |allowance| *allowance += value);
-          } else {
-              <Allowance<T>>::insert((token_id, sender, spender), value);
-          }
+          <Allowance<T>>::mutate((token_id, sender.clone(), spender.clone()), |allowance| {
+              // using checked_add (safe math) to avoid overflow
+              if let Some(updated_allowance) = allowance.checked_add(&value) {
+                  *allowance = updated_allowance;
+                }
+          });
+
+          Self::deposit_event(RawEvent::Approval(token_id, sender.clone(), spender.clone(), value));
 
           Ok(())
       }
@@ -75,7 +83,13 @@ decl_module! {
         ensure!(<Allowance<T>>::exists((token_id, from.clone(), to.clone())), "Allowance does not exist.");
         ensure!(Self::allowance((token_id, from.clone(), to.clone())) >= value, "Not enough allowance.");
 
-        <Allowance<T>>::mutate((token_id, from.clone(), to.clone()), |allowance| *allowance -= value);
+        <Allowance<T>>::mutate((token_id, from.clone(), to.clone()), |allowance| {
+              // using checked_sub (safe math) to avoid overflow
+              if let Some(updated_allowance) = allowance.checked_sub(&value) {
+                  *allowance = updated_allowance;
+                }
+          });
+
         Self::deposit_event(RawEvent::Approval(token_id, from.clone(), to.clone(), value));
 
         Self::_transfer(token_id, from, to, value)
@@ -126,19 +140,34 @@ impl<T: Trait> Module<T> {
 
         let sender_balance = Self::balance_of((token_id, from.clone()));
         ensure!(sender_balance > value, "Not enough balance.");
+        let mut reduced = false;
+        let mut added = false;
 
-        Self::deposit_event(RawEvent::Transfer(token_id, from.clone(), to.clone(), value));
-        
         // reduce sender's balance
-        <BalanceOf<T>>::mutate((token_id, from), |from_balance| *from_balance -= value);
+        <BalanceOf<T>>::mutate((token_id, from.clone()), |from_balance| {
+            // using checked_sub (safe math) to avoid overflow
+            if let Some(updated_from_balance) = from_balance.checked_sub(&value) {
+                *from_balance = updated_from_balance;
+                reduced = true;
+            }
+        });
 
         // increase receiver's balance
-        if <BalanceOf<T>>::exists((token_id, to.clone())) {
-            <BalanceOf<T>>::mutate((token_id, to), |balance| *balance += value);
-        } else {
-            <BalanceOf<T>>::insert((token_id, to), value);
-        }
+        <BalanceOf<T>>::mutate((token_id, to.clone()), |to_balance| {
+            // using checked_add (safe math) to avoid overflow
+            if let Some(updated_to_balance) = to_balance.checked_add(&value) {
+                if reduced == true {
+                    *to_balance = updated_to_balance;
+                    added = true;
+                }
+            }
+        });
 
-        Ok(())
+        if added == true {
+            Self::deposit_event(RawEvent::Transfer(token_id, from, to, value));
+            Ok(())
+        } else {
+            Err("Transfer failed because of overflow.")
+        }
     }
 }
