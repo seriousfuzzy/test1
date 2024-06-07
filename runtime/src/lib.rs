@@ -174,8 +174,8 @@ impl sudo::Trait for Runtime {
 }
 
 impl erc20::Trait for Runtime {
-	/// The uniquitous event type.
 	type Event = Event;
+	type TokenBalance = u128;
 }
 
 construct_runtime!(
