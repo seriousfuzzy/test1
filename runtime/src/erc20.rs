@@ -1,12 +1,14 @@
 use rstd::prelude::*;
-use support::{dispatch::Result, StorageMap, StorageValue, decl_storage, decl_module, decl_event, ensure};
-use runtime_primitives::traits::{CheckedSub, CheckedAdd};
-use {balances, system::ensure_signed};
+use parity_codec::Codec;
+use support::{dispatch::Result, Parameter, StorageMap, StorageValue, decl_storage, decl_module, decl_event, ensure};
+use runtime_primitives::traits::{CheckedSub, CheckedAdd, Member, SimpleArithmetic, As};
+use system::{self, ensure_signed};
 
 // the module trait
 // contains type definitions
-pub trait Trait: balances::Trait {
+pub trait Trait: system::Trait {
     type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
+    type TokenBalance: Parameter + Member + SimpleArithmetic + Codec + Default + Copy + As<usize> + As<u64>;
 }
 
 // struct to store the token details
@@ -28,7 +30,7 @@ decl_module! {
       // takes a name, ticker, total supply for the token
       // makes the initiating account the owner of the token
       // the balance of the owner is set to total supply
-      fn init(_origin, name: Vec<u8>, ticker: Vec<u8>, total_supply: T::Balance) -> Result {
+      fn init(_origin, name: Vec<u8>, ticker: Vec<u8>, total_supply: T::TokenBalance) -> Result {
           let sender = ensure_signed(_origin)?;
 
           // checking max size for name and ticker
@@ -53,23 +55,20 @@ decl_module! {
 
       // transfer tokens from one account to another
       // origin is assumed as sender
-      fn transfer(_origin, token_id: u32, to: T::AccountId, value: T::Balance) -> Result {
+      fn transfer(_origin, token_id: u32, to: T::AccountId, value: T::TokenBalance) -> Result {
           let sender = ensure_signed(_origin)?;
           Self::_transfer(token_id, sender, to, value)
       }
 
       // approve token transfer from one account to another
       // once this is done, transfer_from can be called with corresponding values
-      fn approve(_origin, token_id: u32, spender: T::AccountId, value: T::Balance) -> Result {
+      fn approve(_origin, token_id: u32, spender: T::AccountId, value: T::TokenBalance) -> Result {
           let sender = ensure_signed(_origin)?;
           ensure!(<BalanceOf<T>>::exists((token_id, sender.clone())), "Account does not own this token");
 
-          <Allowance<T>>::mutate((token_id, sender.clone(), spender.clone()), |allowance| {
-              // using checked_add (safe math) to avoid overflow
-              if let Some(updated_allowance) = allowance.checked_add(&value) {
-                  *allowance = updated_allowance;
-                }
-          });
+          let allowance = Self::allowance((token_id, sender.clone(), spender.clone()));
+          let updated_allowance = allowance.checked_add(&value).ok_or("overflow in calculating allowance")?;
+          <Allowance<T>>::insert((token_id, sender.clone(), spender.clone()), updated_allowance);
 
           Self::deposit_event(RawEvent::Approval(token_id, sender.clone(), spender.clone(), value));
 
@@ -79,19 +78,16 @@ decl_module! {
       // the ERC20 standard transfer_from function
       // implemented in the open-zeppelin way - increase/decrease allownace
       // if approved, transfer from an account to another account without owner's signature
-      pub fn transfer_from(_origin, token_id: u32, from: T::AccountId, to: T::AccountId, value: T::Balance) -> Result {
+      pub fn transfer_from(_origin, token_id: u32, from: T::AccountId, to: T::AccountId, value: T::TokenBalance) -> Result {
         ensure!(<Allowance<T>>::exists((token_id, from.clone(), to.clone())), "Allowance does not exist.");
-        ensure!(Self::allowance((token_id, from.clone(), to.clone())) >= value, "Not enough allowance.");
-
-        <Allowance<T>>::mutate((token_id, from.clone(), to.clone()), |allowance| {
-              // using checked_sub (safe math) to avoid overflow
-              if let Some(updated_allowance) = allowance.checked_sub(&value) {
-                  *allowance = updated_allowance;
-                }
-          });
+        let allowance = Self::allowance((token_id, from.clone(), to.clone()));
+        ensure!(allowance >= value, "Not enough allowance.");
+          
+        // using checked_sub (safe math) to avoid overflow
+        let updated_allowance = allowance.checked_sub(&value).ok_or("overflow in calculating allowance")?;
+        <Allowance<T>>::insert((token_id, from.clone(), to.clone()), updated_allowance);
 
         Self::deposit_event(RawEvent::Approval(token_id, from.clone(), to.clone(), value));
-
         Self::_transfer(token_id, from, to, value)
       }
   }
@@ -104,17 +100,17 @@ decl_storage! {
       // inspired by the AssetId in the SRML assets module
       TokenId get(token_id): u32;
       // details of the token corresponding to a token id
-      Tokens get(token_details): map u32 => Erc20Token<T::Balance>;
+      Tokens get(token_details): map u32 => Erc20Token<T::TokenBalance>;
       // balances mapping for an account and token
-      BalanceOf get(balance_of): map (u32, T::AccountId) => T::Balance;
+      BalanceOf get(balance_of): map (u32, T::AccountId) => T::TokenBalance;
       // allowance for an account and token
-      Allowance get(allowance): map (u32, T::AccountId, T::AccountId) => T::Balance;
+      Allowance get(allowance): map (u32, T::AccountId, T::AccountId) => T::TokenBalance;
   }
 }
 
 // events
 decl_event!(
-    pub enum Event<T> where AccountId = <T as system::Trait>::AccountId, Balance = <T as balances::Trait>::Balance {
+    pub enum Event<T> where AccountId = <T as system::Trait>::AccountId, Balance = <T as self::Trait>::TokenBalance {
         // event for transfer of tokens
         // tokenid, from, to, value
         Transfer(u32, AccountId, AccountId, Balance),
@@ -134,40 +130,23 @@ impl<T: Trait> Module<T> {
         token_id: u32,
         from: T::AccountId,
         to: T::AccountId,
-        value: T::Balance,
+        value: T::TokenBalance,
     ) -> Result {
         ensure!(<BalanceOf<T>>::exists((token_id, from.clone())), "Account does not own this token");
-
         let sender_balance = Self::balance_of((token_id, from.clone()));
         ensure!(sender_balance > value, "Not enough balance.");
-        let mut reduced = false;
-        let mut added = false;
 
+        let updated_from_balance = sender_balance.checked_sub(&value).ok_or("overflow in calculating balance")?;
+        let receiver_balance = Self::balance_of((token_id, to.clone()));
+        let updated_to_balance = receiver_balance.checked_add(&value).ok_or("overflow in calculating balance")?;
+        
         // reduce sender's balance
-        <BalanceOf<T>>::mutate((token_id, from.clone()), |from_balance| {
-            // using checked_sub (safe math) to avoid overflow
-            if let Some(updated_from_balance) = from_balance.checked_sub(&value) {
-                *from_balance = updated_from_balance;
-                reduced = true;
-            }
-        });
+        <BalanceOf<T>>::insert((token_id, from.clone()), updated_from_balance);
 
         // increase receiver's balance
-        <BalanceOf<T>>::mutate((token_id, to.clone()), |to_balance| {
-            // using checked_add (safe math) to avoid overflow
-            if let Some(updated_to_balance) = to_balance.checked_add(&value) {
-                if reduced == true {
-                    *to_balance = updated_to_balance;
-                    added = true;
-                }
-            }
-        });
+        <BalanceOf<T>>::insert((token_id, to.clone()), updated_to_balance);
 
-        if added == true {
-            Self::deposit_event(RawEvent::Transfer(token_id, from, to, value));
-            Ok(())
-        } else {
-            Err("Transfer failed because of overflow.")
-        }
+        Self::deposit_event(RawEvent::Transfer(token_id, from, to, value));
+        Ok(())
     }
 }
