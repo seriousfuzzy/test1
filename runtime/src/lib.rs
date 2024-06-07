@@ -32,6 +32,8 @@ extern crate srml_aura as aura;
 extern crate srml_indices as indices;
 extern crate substrate_consensus_aura_primitives as consensus_aura;
 
+mod erc20;
+
 use rstd::prelude::*;
 #[cfg(feature = "std")]
 use primitives::bytes;
@@ -194,6 +196,11 @@ impl sudo::Trait for Runtime {
 	type Proposal = Call;
 }
 
+impl erc20::Trait for Runtime {
+	/// The uniquitous event type.
+	type Event = Event;
+}
+
 construct_runtime!(
 	pub enum Runtime with Log(InternalLog: DigestItem<Hash, Ed25519AuthorityId>) where
 		Block = Block,
@@ -207,6 +214,7 @@ construct_runtime!(
 		Indices: indices,
 		Balances: balances,
 		Sudo: sudo,
+		Erc20: erc20::{Module, Call, Storage, Event<T>},
 	}
 );
 
