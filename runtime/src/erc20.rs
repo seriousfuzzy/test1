@@ -2,7 +2,7 @@ use rstd::prelude::*;
 use srml_support::{dispatch::Result, StorageMap, StorageValue};
 use {balances, system::ensure_signed};
 
-// trait for this module
+// the module trait
 // contains type definitions
 pub trait Trait: balances::Trait {
     type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
@@ -17,8 +17,6 @@ pub struct Erc20Token<U> {
 }
 
 // public interface for this runtime module
-// these functions can't be accessed by other modules
-// they will be accessible only by the outer world
 decl_module! {
   pub struct Module<T: Trait> for enum Call where origin: T::Origin {
       // initialize the default event for this module
