@@ -10,11 +10,10 @@ pub trait Trait: balances::Trait {
 
 // struct to store the token details
 #[derive(Encode, Decode, Default, Clone, PartialEq, Debug)]
-pub struct Erc20Token<U, V> {
+pub struct Erc20Token<U> {
     name: Vec<u8>,
     ticker: Vec<u8>,
     total_supply: U,
-    owner: V
 }
 
 // public interface for this runtime module
@@ -40,7 +39,6 @@ decl_module! {
               name,
               ticker,
               total_supply,
-              owner: sender.clone()
           };
 
           <Tokens<T>>::insert(token_id, token);
@@ -72,9 +70,17 @@ decl_module! {
           Ok(())
       }
 
+      // the ERC20 standard transfer_from function
+      // implemented in the open-zeppelin way - increase/decrease allownace
       // if approved, transfer from an account to another account without owner's signature
-      fn transfer_from(_origin, token_id: u32, from: T::AccountId, to: T::AccountId, value: T::Balance) -> Result {
-          Self::_transfer_from(token_id, from, to, value)
+      pub fn transfer_from(_origin, token_id: u32, from: T::AccountId, to: T::AccountId, value: T::Balance) -> Result {
+        ensure!(<Allowance<T>>::exists((token_id, from.clone(), to.clone())), "Allowance does not exist.");
+        ensure!(Self::allowance((token_id, from.clone(), to.clone())) >= value, "Not enough allowance.");
+
+        <Allowance<T>>::mutate((token_id, from.clone(), to.clone()), |allowance| *allowance -= value);
+        Self::deposit_event(RawEvent::Approval(token_id, from.clone(), to.clone(), value));
+
+        Self::_transfer(token_id, from, to, value)
       }
   }
 }
@@ -86,7 +92,7 @@ decl_storage! {
       // inspired by the AssetId in the SRML assets module
       TokenId get(token_id): u32;
       // details of the token corresponding to a token id
-      Tokens get(token_details): map u32 => Erc20Token<T::Balance, T::AccountId>;
+      Tokens get(token_details): map u32 => Erc20Token<T::Balance>;
       // balances mapping for an account and token
       BalanceOf get(balance_of): map (u32, T::AccountId) => T::Balance;
       // allowance for an account and token
@@ -110,23 +116,6 @@ decl_event!(
 // utility and private functions
 // if marked public, accessible by other modules
 impl<T: Trait> Module<T> {
-    // the ERC20 standard transfer_from function
-    // implemented in the open-zeppelin way - increase/decrease allownace
-    pub fn _transfer_from(
-        token_id: u32,
-        from: T::AccountId,
-        to: T::AccountId,
-        value: T::Balance,
-    ) -> Result {
-        ensure!(<Allowance<T>>::exists((token_id, from.clone(), to.clone())), "Allowance does not exist.");
-        ensure!(Self::allowance((token_id, from.clone(), to.clone())) >= value, "Not enough allowance.");
-
-        <Allowance<T>>::mutate((token_id, from.clone(), to.clone()), |allowance| *allowance -= value);
-        Self::deposit_event(RawEvent::Approval(token_id, from.clone(), to.clone(), value));
-
-        Self::_transfer(token_id, from, to, value)
-    }
-
     // the ERC20 standard transfer function
     // internal
     fn _transfer(
